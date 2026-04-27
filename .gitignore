@@ -1,0 +1,10 @@
+node_modules/
+jars/
+java/
+server/
+data/
+*.log
+*.tar.gz
+*.zip
+.env
+nohup.out
