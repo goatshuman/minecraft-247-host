@@ -116,7 +116,22 @@ function buildControlButtons(state) {
       .setDisabled(isOnline || isBusy),
   );
 
-  return [row1, row2];
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('mc_upload_world')
+      .setLabel('Upload World')
+      .setEmoji('📁')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(isOnline || isBusy),
+    new ButtonBuilder()
+      .setCustomId('mc_upload_mods')
+      .setLabel('Upload Mods')
+      .setEmoji('🔧')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(isOnline || isBusy),
+  );
+
+  return [row1, row2, row3];
 }
 
 function buildPlayerEmbed(playerName, data, advancements) {
