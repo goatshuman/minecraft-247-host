@@ -13,6 +13,7 @@ const { buildControlEmbed, buildControlButtons, buildPlayerEmbed } = require('./
 const { ensureJava } = require('./java');
 const { getAllVersions } = require('./versions');
 const { downloadAllJars } = require('./downloadAll');
+const { handleWorldUpload, handleModsUpload, pushAllToGitHub, triggerRenderDeploy } = require('./uploader');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let state = loadState();
@@ -23,6 +24,9 @@ let playerEmbedMessages = {};
 let logChannel = null;
 let controlChannel = null;
 let isResendingEmbed = false;
+
+// Upload waiting state: { type: 'world'|'mods', channelId, replyFn, timeout }
+let waitingUpload = null;
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 const client = new Client({
@@ -401,6 +405,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.showModal(modal);
   }
 
+  // ── UPLOAD WORLD ──
+  if (id === 'mc_upload_world') {
+    await interaction.reply({
+      content: '📁 **Upload Your World**\n\nZip your world folder (the one containing `level.dat`) and send it as a file attachment in this channel right now.\n\n> Waiting 5 minutes for your upload...',
+      flags: MessageFlags.Ephemeral,
+    });
+    if (waitingUpload?.timeout) clearTimeout(waitingUpload.timeout);
+    waitingUpload = {
+      type: 'world',
+      channelId: interaction.channelId,
+      timeout: setTimeout(() => { waitingUpload = null; }, 5 * 60 * 1000),
+    };
+    return;
+  }
+
+  // ── UPLOAD MODS ──
+  if (id === 'mc_upload_mods') {
+    await interaction.reply({
+      content: '🔧 **Upload Your Mods**\n\nZip your `mods/` folder (containing `.jar` files) and send it as a file attachment in this channel right now.\n\n> Waiting 5 minutes for your upload...',
+      flags: MessageFlags.Ephemeral,
+    });
+    if (waitingUpload?.timeout) clearTimeout(waitingUpload.timeout);
+    waitingUpload = {
+      type: 'mods',
+      channelId: interaction.channelId,
+      timeout: setTimeout(() => { waitingUpload = null; }, 5 * 60 * 1000),
+    };
+    return;
+  }
+
   // ── SWITCH VERSION ──
   if (id === 'mc_switch_version') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -429,6 +463,59 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (!isAllowed(message.author.id)) return;
+
+  // ── Handle zip attachment for world/mods upload ──
+  if (waitingUpload && message.channelId === waitingUpload.channelId && message.attachments.size > 0) {
+    const attachment = message.attachments.first();
+    const isZip = attachment.name?.endsWith('.zip') || attachment.contentType?.includes('zip');
+    if (!isZip) {
+      await message.reply('⚠️ Please send a `.zip` file.');
+      return;
+    }
+
+    const uploadType = waitingUpload.type;
+    clearTimeout(waitingUpload.timeout);
+    waitingUpload = null;
+
+    const statusMsg = await message.reply(`⏳ Processing your **${uploadType}** upload...`);
+
+    const steps = [];
+    const onProgress = (msg) => {
+      steps.push(msg);
+      statusMsg.edit(`⏳ Processing...\n\`\`\`\n${steps.slice(-8).join('\n')}\n\`\`\``).catch(() => {});
+    };
+
+    try {
+      if (uploadType === 'world') {
+        await handleWorldUpload(attachment, onProgress);
+        state.worldConfig.worldExists = true;
+        saveState(state);
+      } else {
+        await handleModsUpload(attachment, onProgress);
+      }
+
+      onProgress('');
+      onProgress('📤 Pushing to GitHub...');
+      await pushAllToGitHub(onProgress);
+
+      onProgress('');
+      await triggerRenderDeploy(onProgress);
+
+      await statusMsg.edit(
+        `✅ **${uploadType === 'world' ? 'World' : 'Mods'} uploaded successfully!**\n\`\`\`\n${steps.slice(-12).join('\n')}\n\`\`\`` +
+        `\n\n🔗 GitHub: <https://github.com/goatshuman/minecraft-247-host>`
+      );
+      await log(
+        `📁 ${uploadType === 'world' ? 'World' : 'Mods'} Uploaded`,
+        `Custom ${uploadType} installed, pushed to GitHub and deploy triggered.`,
+        0x00aaff
+      );
+    } catch (e) {
+      console.error(`[Upload] ${uploadType} upload failed:`, e.message);
+      await statusMsg.edit(`❌ Upload failed: ${e.message}`);
+    }
+    return;
+  }
 
   if (message.content === '!delete') {
     try {
