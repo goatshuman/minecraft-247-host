@@ -1,0 +1,15 @@
+module.exports = {
+  DISCORD_TOKEN: process.env.DISCORD_TOKEN,
+  NGROK_AUTH_TOKEN: process.env.NGROK_AUTH_TOKEN,
+  GUILD_ID: process.env.GUILD_ID || '1475078115624751327',
+  LOGS_CHANNEL_ID: process.env.LOGS_CHANNEL_ID || '1475078538586493120',
+  CONTROL_CHANNEL_ID: process.env.CONTROL_CHANNEL_ID || '1475078593330806888',
+  PLAYER_CATEGORY_ID: process.env.PLAYER_CATEGORY_ID || '1493922682075615333',
+  ALLOWED_USER_ID: process.env.ALLOWED_USER_ID || '862948496440819772',
+  MC_PORT: 25565,
+  RCON_PORT: 25575,
+  RCON_PASSWORD: 'mcbotpassword123',
+  SERVER_DIR: require('path').join(__dirname, '..', 'server'),
+  DATA_FILE: require('path').join(__dirname, '..', 'data', 'state.json'),
+  JAVA_DIR: require('path').join(__dirname, '..', 'java'),
+};
