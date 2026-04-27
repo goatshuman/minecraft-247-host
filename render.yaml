@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: mc-discord-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node src/bot.js
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: NGROK_AUTH_TOKEN
+        sync: false
+      - key: GUILD_ID
+        value: "1475078115624751327"
+      - key: LOGS_CHANNEL_ID
+        value: "1475078538586493120"
+      - key: CONTROL_CHANNEL_ID
+        value: "1475078593330806888"
+      - key: PLAYER_CATEGORY_ID
+        value: "1493922682075615333"
+      - key: ALLOWED_USER_ID
+        value: "862948496440819772"
