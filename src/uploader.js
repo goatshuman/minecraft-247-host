@@ -2,16 +2,12 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const AdmZip = require('adm-zip');
 
 const USER = 'goatshuman';
 const REPO = 'minecraft-247-host';
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'data']);
-const SKIP_EXTS = new Set(['.tar.gz', '.gz', '.zip']);
-const SKIP_FILES = new Set(['push_to_github.js']);
-
-// ─── GitHub API helpers ───────────────────────────────────────────────────────
+// ─── GitHub API ───────────────────────────────────────────────────────────────
 function apiRequest(method, endpoint, body) {
   const TOKEN = process.env.GITHUB_TOKEN;
   return new Promise((resolve, reject) => {
@@ -21,7 +17,7 @@ function apiRequest(method, endpoint, body) {
       path: endpoint,
       method,
       headers: {
-        'Authorization': `token ${TOKEN}`,
+        Authorization: `token ${TOKEN}`,
         'User-Agent': 'MCDiscordBot/1.0',
         'Content-Type': 'application/json',
         ...(data ? { 'Content-Length': Buffer.byteLength(data) } : {}),
@@ -29,7 +25,7 @@ function apiRequest(method, endpoint, body) {
     };
     const req = https.request(options, (res) => {
       let b = '';
-      res.on('data', c => b += c);
+      res.on('data', (c) => (b += c));
       res.on('end', () => {
         try { resolve({ status: res.statusCode, data: JSON.parse(b) }); }
         catch (e) { resolve({ status: res.statusCode, data: b }); }
@@ -42,96 +38,106 @@ function apiRequest(method, endpoint, body) {
 }
 
 async function getFileSha(repoPath) {
-  const res = await apiRequest('GET', `/repos/${USER}/${REPO}/contents/${repoPath}`);
+  const res = await apiRequest('GET', `/repos/${USER}/${REPO}/contents/${encodeURI(repoPath)}`);
   if (res.status === 200 && res.data.sha) return res.data.sha;
   return null;
 }
 
-async function uploadFileToGitHub(localPath, repoPath, onProgress) {
-  const content = fs.readFileSync(localPath);
-  const encoded = content.toString('base64');
-  const sha = await getFileSha(repoPath);
-
-  const body = {
-    message: sha ? `Update ${repoPath}` : `Add ${repoPath}`,
-    content: encoded,
-    ...(sha ? { sha } : {}),
-  };
-
-  const res = await apiRequest('PUT', `/repos/${USER}/${REPO}/contents/${encodeURI(repoPath)}`, body);
-  if (res.status === 200 || res.status === 201) {
-    if (onProgress) onProgress(`✅ ${repoPath}`);
-    return true;
-  } else {
-    if (onProgress) onProgress(`❌ ${repoPath}: ${res.status} ${res.data?.message || ''}`);
+async function uploadFileToGitHub(localPath, repoPath) {
+  try {
+    const stat = fs.statSync(localPath);
+    if (stat.size > 49 * 1024 * 1024) return false; // skip >49MB
+    const content = fs.readFileSync(localPath).toString('base64');
+    const sha = await getFileSha(repoPath);
+    const body = {
+      message: sha ? `Update ${repoPath}` : `Add ${repoPath}`,
+      content,
+      ...(sha ? { sha } : {}),
+    };
+    const res = await apiRequest('PUT', `/repos/${USER}/${REPO}/contents/${encodeURI(repoPath)}`, body);
+    return res.status === 200 || res.status === 201;
+  } catch (e) {
     return false;
   }
 }
 
-function collectFiles(dir, base = '') {
+function collectFiles(dir, base = '', skipDirs = new Set()) {
   const files = [];
-  const items = fs.readdirSync(dir);
+  let items;
+  try { items = fs.readdirSync(dir); } catch { return files; }
   for (const item of items) {
     if (item.startsWith('.') && item !== '.env.example' && item !== '.gitignore') continue;
     const full = path.join(dir, item);
     const rel = base ? `${base}/${item}` : item;
-    const stat = fs.statSync(full);
+    let stat;
+    try { stat = fs.statSync(full); } catch { continue; }
     if (stat.isDirectory()) {
-      if (SKIP_DIRS.has(item)) continue;
-      files.push(...collectFiles(full, rel));
+      if (skipDirs.has(item)) continue;
+      files.push(...collectFiles(full, rel, skipDirs));
     } else {
-      if (SKIP_FILES.has(item)) continue;
-      if (SKIP_EXTS.has(path.extname(item))) continue;
-      if (stat.size > 50 * 1024 * 1024) continue;
+      if (stat.size > 49 * 1024 * 1024) continue;
       files.push({ local: full, repo: rel });
     }
   }
   return files;
 }
 
-// Push all bot source files to GitHub
 async function pushAllToGitHub(onProgress) {
   const botDir = path.join(__dirname, '..');
-  const files = collectFiles(botDir);
+  const SKIP = new Set(['node_modules', '.git', 'data', 'server', 'java']);
+  const files = collectFiles(botDir, '', SKIP);
   if (onProgress) onProgress(`📁 Pushing ${files.length} files to GitHub...`);
   let ok = 0, fail = 0;
   for (const { local, repo } of files) {
-    try {
-      const success = await uploadFileToGitHub(local, repo, onProgress);
-      success ? ok++ : fail++;
-    } catch (e) {
-      if (onProgress) onProgress(`❌ ${repo}: ${e.message}`);
-      fail++;
-    }
+    const success = await uploadFileToGitHub(local, repo);
+    success ? ok++ : fail++;
   }
-  if (onProgress) onProgress(`✅ GitHub push done — ${ok} uploaded, ${fail} failed`);
+  if (onProgress) onProgress(`✅ GitHub: ${ok} uploaded, ${fail} skipped`);
   return { ok, fail };
 }
 
 async function pushEverythingToGitHub(onProgress) {
-  const root = path.join(__dirname, '..');
+  const botDir = path.join(__dirname, '..');
+  // Include jars but skip node_modules, java binary (too large), .git
+  const SKIP = new Set(['node_modules', '.git', 'java', 'data', 'server']);
   const files = [];
-  for (const item of fs.readdirSync(root)) {
-    const full = path.join(root, item);
-    if (item === '.git' || item === 'node_modules') continue;
-    if (fs.statSync(full).isDirectory()) {
-      files.push(...collectFiles(full, item));
-    } else {
-      files.push({ local: full, repo: item });
-    }
+
+  // Source files (no skip)
+  const srcFiles = collectFiles(path.join(botDir, 'src'), 'src', new Set());
+  files.push(...srcFiles);
+
+  // Root files
+  for (const item of fs.readdirSync(botDir)) {
+    const full = path.join(botDir, item);
+    if (item.startsWith('.') && item !== '.gitignore' && item !== '.env.example') continue;
+    try {
+      const stat = fs.statSync(full);
+      if (!stat.isDirectory() && stat.size < 49 * 1024 * 1024) {
+        files.push({ local: full, repo: item });
+      }
+    } catch {}
   }
-  if (onProgress) onProgress(`📁 Pushing ${files.length} files/folders to GitHub...`);
+
+  // Jars directory — include all .jar files
+  const jarsDir = path.join(botDir, 'jars');
+  if (fs.existsSync(jarsDir)) {
+    const jars = collectFiles(jarsDir, 'jars', new Set());
+    files.push(...jars);
+    if (onProgress) onProgress(`📦 Found ${jars.length} jars to upload...`);
+  }
+
+  if (onProgress) onProgress(`📁 Pushing ${files.length} total files to GitHub...`);
   let ok = 0, fail = 0;
   for (const { local, repo } of files) {
-    try {
-      const success = await uploadFileToGitHub(local, repo, onProgress);
-      success ? ok++ : fail++;
-    } catch (e) {
-      if (onProgress) onProgress(`❌ ${repo}: ${e.message}`);
+    const success = await uploadFileToGitHub(local, repo);
+    if (success) {
+      ok++;
+      if (onProgress && ok % 10 === 0) onProgress(`✅ ${ok} files uploaded...`);
+    } else {
       fail++;
     }
   }
-  if (onProgress) onProgress(`✅ Full GitHub push done — ${ok} uploaded, ${fail} failed`);
+  if (onProgress) onProgress(`✅ GitHub complete: ${ok} uploaded, ${fail} skipped`);
   return { ok, fail };
 }
 
@@ -139,168 +145,145 @@ async function pushEverythingToGitHub(onProgress) {
 async function triggerRenderDeploy(onProgress) {
   const hook = process.env.RENDER_DEPLOY_HOOK;
   if (!hook) {
-    if (onProgress) onProgress('⚠️ No RENDER_DEPLOY_HOOK set — skipping auto-deploy');
+    if (onProgress) onProgress('⚠️ No RENDER_DEPLOY_HOOK configured');
     return false;
   }
-
   return new Promise((resolve) => {
     const url = new URL(hook);
     const mod = url.protocol === 'https:' ? https : http;
-    const req = mod.request({ hostname: url.hostname, path: url.pathname + url.search, method: 'POST' }, (res) => {
-      if (onProgress) onProgress(`🚀 Render deploy triggered (${res.statusCode})`);
-      resolve(res.statusCode === 200 || res.statusCode === 201);
-    });
+    const req = mod.request(
+      { hostname: url.hostname, path: url.pathname + url.search, method: 'POST' },
+      (res) => {
+        if (onProgress) onProgress(`🚀 Render deploy triggered (${res.statusCode})`);
+        resolve(true);
+      }
+    );
     req.on('error', (e) => {
-      if (onProgress) onProgress(`❌ Render deploy failed: ${e.message}`);
+      if (onProgress) onProgress(`❌ Render deploy: ${e.message}`);
       resolve(false);
     });
     req.end();
   });
 }
 
-// ─── Download a Discord attachment ────────────────────────────────────────────
+// ─── Extract zip (pure JS via adm-zip) ───────────────────────────────────────
+function extractZip(zipPath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  const zip = new AdmZip(zipPath);
+  zip.extractAllTo(destDir, true);
+}
+
+// ─── Download file from URL ───────────────────────────────────────────────────
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(dest);
-    mod.get(url, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        file.close();
-        fs.unlinkSync(dest);
-        return downloadFile(res.headers.location, dest).then(resolve).catch(reject);
-      }
-      res.pipe(file);
-      file.on('finish', () => file.close(resolve));
-      file.on('error', reject);
-    }).on('error', reject);
+    const doGet = (u) => {
+      mod.get(u, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          file.close();
+          return doGet(res.headers.location);
+        }
+        res.pipe(file);
+        file.on('finish', () => file.close(resolve));
+        file.on('error', reject);
+      }).on('error', reject);
+    };
+    doGet(url);
   });
 }
 
-function extractZip(zipPath, destDir) {
-  fs.mkdirSync(destDir, { recursive: true });
-  execSync(`python3 - <<'PY'\nimport zipfile\nz=zipfile.ZipFile(${JSON.stringify(zipPath)})\nz.extractall(${JSON.stringify(destDir)})\nPY`);
-}
-
-// ─── Handle World upload ──────────────────────────────────────────────────────
-async function handleWorldUpload(attachment, onProgress) {
-  const tmpZip = path.join(__dirname, '..', 'data', 'upload_world.zip');
+// ─── Install world from zip ───────────────────────────────────────────────────
+async function handleWorldUpload(zipPath, onProgress) {
   const worldDir = path.join(__dirname, '..', 'server', 'world');
   const tmpExtract = path.join(__dirname, '..', 'data', 'world_extract');
 
-  fs.mkdirSync(path.dirname(tmpZip), { recursive: true });
+  if (fs.existsSync(tmpExtract)) fs.rmSync(tmpExtract, { recursive: true, force: true });
 
-  onProgress('⬇️ Downloading world zip...');
-  await downloadFile(attachment.url, tmpZip);
+  onProgress('📦 Extracting world zip...');
+  extractZip(zipPath, tmpExtract);
 
-  onProgress('📦 Extracting world...');
-  await extractZip(tmpZip, tmpExtract);
-
-  // Find the actual world folder inside (might be nested)
-  const entries = fs.readdirSync(tmpExtract);
+  // Find world root (containing level.dat)
   let worldSource = tmpExtract;
-
-  // If there's a single folder inside that looks like a world, use it
-  if (entries.length === 1) {
-    const single = path.join(tmpExtract, entries[0]);
-    if (fs.statSync(single).isDirectory()) {
-      worldSource = single;
-    }
-  }
-
-  // Check if it's a valid world (has level.dat)
-  const hasLevelDat = fs.existsSync(path.join(worldSource, 'level.dat'));
-  if (!hasLevelDat) {
-    // Try one level deeper
-    for (const e of fs.readdirSync(worldSource)) {
-      const sub = path.join(worldSource, e);
-      if (fs.statSync(sub).isDirectory() && fs.existsSync(path.join(sub, 'level.dat'))) {
-        worldSource = sub;
-        break;
+  function findLevelDat(dir) {
+    if (fs.existsSync(path.join(dir, 'level.dat'))) return dir;
+    try {
+      for (const entry of fs.readdirSync(dir)) {
+        const sub = path.join(dir, entry);
+        if (fs.statSync(sub).isDirectory()) {
+          const found = findLevelDat(sub);
+          if (found) return found;
+        }
       }
-    }
+    } catch {}
+    return null;
   }
+  const found = findLevelDat(tmpExtract);
+  if (found) worldSource = found;
 
-  onProgress('🌍 Installing world to server...');
-  // Remove old world
-  if (fs.existsSync(worldDir)) {
-    fs.rmSync(worldDir, { recursive: true, force: true });
-  }
-  // Copy new world
+  onProgress('🌍 Installing world...');
+  if (fs.existsSync(worldDir)) fs.rmSync(worldDir, { recursive: true, force: true });
   fs.cpSync(worldSource, worldDir, { recursive: true });
-
-  fs.unlinkSync(tmpZip);
   fs.rmSync(tmpExtract, { recursive: true, force: true });
-
   onProgress('✅ World installed!');
   return true;
 }
 
-// ─── Handle Mods upload ───────────────────────────────────────────────────────
-async function handleModsUpload(attachment, onProgress) {
-  const tmpZip = path.join(__dirname, '..', 'data', 'upload_mods.zip');
+// ─── Install mods from zip ────────────────────────────────────────────────────
+async function handleModsUpload(zipPath, onProgress) {
   const modsDir = path.join(__dirname, '..', 'server', 'mods');
   const tmpExtract = path.join(__dirname, '..', 'data', 'mods_extract');
 
-  fs.mkdirSync(path.dirname(tmpZip), { recursive: true });
+  if (fs.existsSync(tmpExtract)) fs.rmSync(tmpExtract, { recursive: true, force: true });
 
-  onProgress('⬇️ Downloading mods zip...');
-  await downloadFile(attachment.url, tmpZip);
-
-  onProgress('📦 Extracting mods...');
-  await extractZip(tmpZip, tmpExtract);
+  onProgress('📦 Extracting mods zip...');
+  extractZip(zipPath, tmpExtract);
 
   onProgress('🔧 Installing mods...');
-  // Clear old mods
-  if (fs.existsSync(modsDir)) {
-    fs.rmSync(modsDir, { recursive: true, force: true });
-  }
+  if (fs.existsSync(modsDir)) fs.rmSync(modsDir, { recursive: true, force: true });
   fs.mkdirSync(modsDir, { recursive: true });
 
-  // Find .jar files anywhere in the extracted content and put them in mods/
+  // Find all .jar files
   function findJars(dir) {
     const jars = [];
-    for (const item of fs.readdirSync(dir)) {
-      const full = path.join(dir, item);
-      const stat = fs.statSync(full);
-      if (stat.isDirectory()) jars.push(...findJars(full));
-      else if (item.endsWith('.jar')) jars.push(full);
-    }
+    try {
+      for (const item of fs.readdirSync(dir)) {
+        const full = path.join(dir, item);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) jars.push(...findJars(full));
+        else if (item.endsWith('.jar')) jars.push(full);
+      }
+    } catch {}
     return jars;
   }
 
-  // First check if there's a mods/ folder inside extracted dir
+  // Check for mods/ subfolder first
   let modsSource = null;
-  for (const entry of fs.readdirSync(tmpExtract)) {
-    const full = path.join(tmpExtract, entry);
-    if (fs.statSync(full).isDirectory() && entry.toLowerCase() === 'mods') {
-      modsSource = full;
-      break;
+  try {
+    for (const entry of fs.readdirSync(tmpExtract)) {
+      const full = path.join(tmpExtract, entry);
+      if (fs.statSync(full).isDirectory()) {
+        if (entry.toLowerCase() === 'mods') { modsSource = full; break; }
+        const inner = path.join(full, 'mods');
+        if (fs.existsSync(inner)) { modsSource = inner; break; }
+      }
     }
-    if (fs.statSync(full).isDirectory()) {
-      const inner = path.join(full, 'mods');
-      if (fs.existsSync(inner)) { modsSource = inner; break; }
-    }
-  }
+  } catch {}
 
   if (modsSource) {
     fs.cpSync(modsSource, modsDir, { recursive: true });
   } else {
-    // Just copy all .jar files found
     const jars = findJars(tmpExtract);
-    for (const jar of jars) {
-      fs.copyFileSync(jar, path.join(modsDir, path.basename(jar)));
-    }
-    if (jars.length === 0) {
-      // Copy everything as-is
+    if (jars.length > 0) {
+      for (const jar of jars) fs.copyFileSync(jar, path.join(modsDir, path.basename(jar)));
+    } else {
       fs.cpSync(tmpExtract, modsDir, { recursive: true });
     }
   }
 
-  fs.unlinkSync(tmpZip);
   fs.rmSync(tmpExtract, { recursive: true, force: true });
-
-  const installed = fs.readdirSync(modsDir).length;
-  onProgress(`✅ ${installed} mod(s) installed!`);
+  const count = fs.readdirSync(modsDir).length;
+  onProgress(`✅ ${count} mod file(s) installed!`);
   return true;
 }
 
