@@ -2,13 +2,13 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execSync, exec } = require('child_process');
+const { execSync } = require('child_process');
 
 const USER = 'goatshuman';
 const REPO = 'minecraft-247-host';
 
-const SKIP_DIRS = new Set(['node_modules', 'jars', 'java', 'server', 'data', '.git']);
-const SKIP_EXTS = new Set(['.tar.gz', '.gz', '.zip', '.jar']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'data']);
+const SKIP_EXTS = new Set(['.tar.gz', '.gz', '.zip']);
 const SKIP_FILES = new Set(['push_to_github.js']);
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────
@@ -108,6 +108,33 @@ async function pushAllToGitHub(onProgress) {
   return { ok, fail };
 }
 
+async function pushEverythingToGitHub(onProgress) {
+  const root = path.join(__dirname, '..');
+  const files = [];
+  for (const item of fs.readdirSync(root)) {
+    const full = path.join(root, item);
+    if (item === '.git' || item === 'node_modules') continue;
+    if (fs.statSync(full).isDirectory()) {
+      files.push(...collectFiles(full, item));
+    } else {
+      files.push({ local: full, repo: item });
+    }
+  }
+  if (onProgress) onProgress(`📁 Pushing ${files.length} files/folders to GitHub...`);
+  let ok = 0, fail = 0;
+  for (const { local, repo } of files) {
+    try {
+      const success = await uploadFileToGitHub(local, repo, onProgress);
+      success ? ok++ : fail++;
+    } catch (e) {
+      if (onProgress) onProgress(`❌ ${repo}: ${e.message}`);
+      fail++;
+    }
+  }
+  if (onProgress) onProgress(`✅ Full GitHub push done — ${ok} uploaded, ${fail} failed`);
+  return { ok, fail };
+}
+
 // ─── Render deploy hook ───────────────────────────────────────────────────────
 async function triggerRenderDeploy(onProgress) {
   const hook = process.env.RENDER_DEPLOY_HOOK;
@@ -149,20 +176,9 @@ function downloadFile(url, dest) {
   });
 }
 
-// ─── Extract zip using unzip system command ───────────────────────────────────
 function extractZip(zipPath, destDir) {
-  return new Promise((resolve, reject) => {
-    // Ensure dest exists
-    fs.mkdirSync(destDir, { recursive: true });
-    exec(`unzip -o "${zipPath}" -d "${destDir}"`, (err, stdout, stderr) => {
-      if (err) {
-        // Fallback: try using node's built-in method
-        reject(new Error(stderr || err.message));
-      } else {
-        resolve(stdout);
-      }
-    });
-  });
+  fs.mkdirSync(destDir, { recursive: true });
+  execSync(`python3 - <<'PY'\nimport zipfile\nz=zipfile.ZipFile(${JSON.stringify(zipPath)})\nz.extractall(${JSON.stringify(destDir)})\nPY`);
 }
 
 // ─── Handle World upload ──────────────────────────────────────────────────────
@@ -212,7 +228,6 @@ async function handleWorldUpload(attachment, onProgress) {
   // Copy new world
   fs.cpSync(worldSource, worldDir, { recursive: true });
 
-  // Cleanup
   fs.unlinkSync(tmpZip);
   fs.rmSync(tmpExtract, { recursive: true, force: true });
 
@@ -281,7 +296,6 @@ async function handleModsUpload(attachment, onProgress) {
     }
   }
 
-  // Cleanup
   fs.unlinkSync(tmpZip);
   fs.rmSync(tmpExtract, { recursive: true, force: true });
 
@@ -294,5 +308,6 @@ module.exports = {
   handleWorldUpload,
   handleModsUpload,
   pushAllToGitHub,
+  pushEverythingToGitHub,
   triggerRenderDeploy,
 };
