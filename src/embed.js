@@ -25,9 +25,7 @@ function buildControlEmbed(state) {
   const statusText = isOnline ? 'ONLINE' : isStarting ? 'STARTING...' : isStopping ? 'STOPPING...' : 'OFFLINE';
 
   const ngrokUrl = server.getNgrokUrl();
-  const serverIP = isOnline && ngrokUrl
-    ? ngrokUrl.replace('tcp://', '')
-    : 'Not started';
+  const serverIP = isOnline && ngrokUrl ? ngrokUrl.replace('tcp://', '') : 'Not started';
 
   const ram = server.getSystemRAM();
   const disk = server.getDiskUsage();
@@ -43,20 +41,19 @@ function buildControlEmbed(state) {
     .setColor(isOnline ? 0x00ff00 : isStarting || isStopping ? 0xffaa00 : 0xff0000)
     .setTitle(`${statusEmoji} MINECRAFT SERVER — ${statusText}`)
     .addFields(
-      { name: '🏷️ Version', value: version, inline: true },
-      { name: '👥 Players', value: players, inline: true },
-      { name: '⏱️ Uptime', value: isOnline ? formatUptime(uptime) : '0s', inline: true },
-      { name: '🌐 Server IP', value: `\`\`\`${serverIP}\`\`\``, inline: false },
-      { name: `📶 Ping`, value: isOnline ? `${progressBar(70)} Online` : `${progressBar(0)} Offline`, inline: false },
-      { name: '⚡ TPS / MSPT', value: tps === 'N/A' ? 'N/A' : `${tps} TPS / ${mspt}ms`, inline: false },
-      { name: '🖥️ System RAM', value: `${progressBar(ram.pct)} **${ram.pct}%** (${ram.used}G / ${ram.total}G)`, inline: false },
-      { name: '🎮 Server RAM', value: '~2G allocated', inline: true },
-      { name: '💾 Storage', value: `${progressBar(disk.pct)} **${disk.pct}%** (${disk.used}G / ${disk.total}G)`, inline: true },
-      { name: '🔑 Mode', value: cracked ? 'Cracked (Offline)' : 'Premium (Online)', inline: true },
-      { name: '🌍 Gamemode', value: gamemode.charAt(0).toUpperCase() + gamemode.slice(1), inline: true },
-      { name: '🌱 Seed', value: state.worldConfig.seed || 'Random', inline: true },
+      { name: 'Status', value: statusText, inline: true },
+      { name: 'Version', value: version, inline: true },
+      { name: 'Players', value: String(players), inline: true },
+      { name: 'Uptime', value: isOnline ? formatUptime(uptime) : '0s', inline: true },
+      { name: 'Server IP', value: `\`${serverIP}\``, inline: false },
+      { name: 'TPS / MSPT', value: tps === 'N/A' ? 'N/A' : `${tps} TPS / ${mspt}ms`, inline: true },
+      { name: 'RAM', value: `${ram.pct}% (${ram.used}G / ${ram.total}G)`, inline: true },
+      { name: 'Storage', value: `${disk.pct}% (${disk.used}G / ${disk.total}G)`, inline: true },
+      { name: 'Mode', value: cracked ? 'Cracked' : 'Premium', inline: true },
+      { name: 'Gamemode', value: gamemode.charAt(0).toUpperCase() + gamemode.slice(1), inline: true },
+      { name: 'Seed', value: state.worldConfig.seed || 'Random', inline: true },
     )
-    .setFooter({ text: `🔴 Live • ngrok • Java 21 • ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST` })
+    .setFooter({ text: `Java 25 • ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST` })
     .setTimestamp();
 
   return embed;
