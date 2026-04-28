@@ -13,7 +13,7 @@ const { buildControlEmbed, buildControlButtons, buildPlayerEmbed } = require('./
 const { ensureJava } = require('./java');
 const { getAllVersions } = require('./versions');
 const { downloadAllJars } = require('./downloadAll');
-const { handleWorldUpload, handleModsUpload, pushAllToGitHub, triggerRenderDeploy } = require('./uploader');
+const { handleWorldUpload, handleModsUpload, pushEverythingToGitHub, triggerRenderDeploy } = require('./uploader');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let state = loadState();
@@ -496,7 +496,7 @@ client.on(Events.MessageCreate, async (message) => {
 
       onProgress('');
       onProgress('📤 Pushing to GitHub...');
-      await pushAllToGitHub(onProgress);
+      await pushEverythingToGitHub(onProgress);
 
       onProgress('');
       await triggerRenderDeploy(onProgress);
