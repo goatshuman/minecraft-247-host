@@ -13,7 +13,10 @@ const { buildControlEmbed, buildControlButtons, buildPlayerEmbed } = require('./
 const { ensureJava } = require('./java');
 const { getAllVersions } = require('./versions');
 const { downloadAllJars } = require('./downloadAll');
-const { handleWorldUpload, handleModsUpload, pushEverythingToGitHub, triggerRenderDeploy } = require('./uploader');
+const { handleWorldUpload, handleModsUpload, pushAllToGitHub, pushEverythingToGitHub, triggerRenderDeploy } = require('./uploader');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let state = loadState();
@@ -25,8 +28,25 @@ let logChannel = null;
 let controlChannel = null;
 let isResendingEmbed = false;
 
-// Upload waiting state: { type: 'world'|'mods', channelId, replyFn, timeout }
-let waitingUpload = null;
+// Active upload tokens: { token: { type, channelId, statusMsg } }
+const activeUploadTokens = {};
+const DATA_DIR = path.join(__dirname, '..', 'data');
+
+function generateUploadToken(type, channelId) {
+  const token = crypto.randomBytes(8).toString('hex');
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(
+    path.join(DATA_DIR, `token_${token}.json`),
+    JSON.stringify({ type, channelId, created: Date.now(), received: false })
+  );
+  activeUploadTokens[token] = { type, channelId, statusMsg: null };
+  return token;
+}
+
+function getUploadUrl(token, type) {
+  const domain = process.env.REPLIT_DEV_DOMAIN || process.env.REPLIT_DOMAINS || 'localhost:3000';
+  return `https://${domain}/upload?token=${token}&type=${type}`;
+}
 
 // ─── Client ──────────────────────────────────────────────────────────────────
 const client = new Client({
@@ -82,19 +102,25 @@ async function updateControlEmbed() {
     const components = buildControlButtons(state);
     await controlMessage.edit({ embeds: [embed], components });
   } catch (e) {
-    // Message was deleted — resend
     if (e.code === 10008 || e.message?.includes('Unknown Message')) {
+      // Message deleted — resend
+      console.log('[Bot] Control embed deleted, resending...');
       controlMessage = null;
       state.controlMessageId = null;
       saveState(state);
       await sendControlEmbed();
+    } else if (e.code === 429 || e.message?.includes('rate limit')) {
+      // Rate limited — skip this tick, will retry next interval
+    } else {
+      console.error('[Bot] Embed update error:', e.code, e.message);
     }
   }
 }
 
 function startEmbedUpdater() {
   if (embedUpdateInterval) clearInterval(embedUpdateInterval);
-  embedUpdateInterval = setInterval(updateControlEmbed, 1000);
+  // 3 seconds is safe — avoids Discord rate limits on edits
+  embedUpdateInterval = setInterval(updateControlEmbed, 3000);
 }
 
 // ─── Player channel management ────────────────────────────────────────────────
@@ -182,10 +208,15 @@ async function startPlayerTracking(playerName, channel) {
 // ─── Server log handling ──────────────────────────────────────────────────────
 server.addLogListener(async (line) => {
   if (line === '__SERVER_ONLINE__') {
+    // Force immediate embed update so user sees ONLINE status right away
+    await updateControlEmbed();
+    // Start ngrok tunnel (takes a few seconds)
     const url = await startTunnel();
     server.setNgrokUrl(url);
-    const ip = url ? url.replace('tcp://', '') : 'Unknown';
-    await log('🟢 Server Online!', `🌐 **Connect**\n\`${ip}\``, 0x00ff00);
+    // Force another embed update with the IP now set
+    await updateControlEmbed();
+    const ip = url ? url.replace('tcp://', '') : 'No tunnel (check NGROK_AUTH_TOKEN)';
+    await log('🟢 Server Online!', `🌐 **Connect IP:** \`${ip}\``, 0x00ff00);
     setTimeout(() => rcon.connect(), 5000);
     return;
   }
@@ -407,31 +438,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ── UPLOAD WORLD ──
   if (id === 'mc_upload_world') {
-    await interaction.reply({
-      content: '📁 **Upload Your World**\n\nZip your world folder (the one containing `level.dat`) and send it as a file attachment in this channel right now.\n\n> Waiting 5 minutes for your upload...',
-      flags: MessageFlags.Ephemeral,
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const token = generateUploadToken('world', interaction.channelId);
+    const uploadUrl = getUploadUrl(token, 'world');
+    // Store channel for status updates
+    activeUploadTokens[token].channel = interaction.channel;
+    await interaction.editReply({
+      content: `📁 **Upload Your World**\n\n**Click the link below** to open the upload page. You can upload files of any size there — no Discord 10MB limit!\n\n🔗 **[Open Upload Page](${uploadUrl})**\n\n> Link expires in 30 minutes.`,
     });
-    if (waitingUpload?.timeout) clearTimeout(waitingUpload.timeout);
-    waitingUpload = {
-      type: 'world',
-      channelId: interaction.channelId,
-      timeout: setTimeout(() => { waitingUpload = null; }, 5 * 60 * 1000),
-    };
+    // Auto-expire token after 30 minutes
+    setTimeout(() => {
+      if (activeUploadTokens[token]) {
+        delete activeUploadTokens[token];
+        const tf = path.join(DATA_DIR, `token_${token}.json`);
+        if (fs.existsSync(tf)) fs.unlinkSync(tf);
+      }
+    }, 30 * 60 * 1000);
     return;
   }
 
   // ── UPLOAD MODS ──
   if (id === 'mc_upload_mods') {
-    await interaction.reply({
-      content: '🔧 **Upload Your Mods**\n\nZip your `mods/` folder (containing `.jar` files) and send it as a file attachment in this channel right now.\n\n> Waiting 5 minutes for your upload...',
-      flags: MessageFlags.Ephemeral,
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const token = generateUploadToken('mods', interaction.channelId);
+    const uploadUrl = getUploadUrl(token, 'mods');
+    activeUploadTokens[token].channel = interaction.channel;
+    await interaction.editReply({
+      content: `🔧 **Upload Your Mods**\n\n**Click the link below** to open the upload page. You can upload files of any size there!\n\n🔗 **[Open Upload Page](${uploadUrl})**\n\n> Link expires in 30 minutes.`,
     });
-    if (waitingUpload?.timeout) clearTimeout(waitingUpload.timeout);
-    waitingUpload = {
-      type: 'mods',
-      channelId: interaction.channelId,
-      timeout: setTimeout(() => { waitingUpload = null; }, 5 * 60 * 1000),
-    };
+    setTimeout(() => {
+      if (activeUploadTokens[token]) {
+        delete activeUploadTokens[token];
+        const tf = path.join(DATA_DIR, `token_${token}.json`);
+        if (fs.existsSync(tf)) fs.unlinkSync(tf);
+      }
+    }, 30 * 60 * 1000);
     return;
   }
 
@@ -459,63 +500,92 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// ─── Upload polling — checks for files uploaded via web interface ─────────────
+async function processUploadedFile(token, tokenData) {
+  const { type, zipPath } = tokenData;
+  const tokenInfo = activeUploadTokens[token];
+  const channel = tokenInfo?.channel || (tokenInfo?.channelId
+    ? client.channels.cache.get(tokenInfo.channelId)
+    : null);
+
+  // Mark as processing
+  const tokenFile = path.join(DATA_DIR, `token_${token}.json`);
+  try {
+    const td = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+    td.processing = true;
+    fs.writeFileSync(tokenFile, JSON.stringify(td));
+  } catch {}
+
+  let statusMsg = null;
+  try {
+    if (channel) {
+      statusMsg = await channel.send(`⏳ Processing your **${type}** upload...`);
+    }
+  } catch (e) {
+    console.error('[Upload] Could not send status message:', e.message);
+  }
+
+  const steps = [];
+  const onProgress = (msg) => {
+    if (!msg) return;
+    steps.push(msg);
+    console.log('[Upload]', msg);
+    if (statusMsg) {
+      statusMsg.edit(`⏳ Processing **${type}**...\n\`\`\`\n${steps.slice(-10).join('\n')}\n\`\`\``).catch(() => {});
+    }
+  };
+
+  try {
+    if (type === 'world') {
+      await handleWorldUpload(zipPath, onProgress);
+      state.worldConfig.worldExists = true;
+      saveState(state);
+    } else {
+      await handleModsUpload(zipPath, onProgress);
+    }
+
+    onProgress('📤 Pushing to GitHub...');
+    await pushAllToGitHub(onProgress);
+    await triggerRenderDeploy(onProgress);
+
+    const successText = `✅ **${type === 'world' ? 'World' : 'Mods'} installed successfully!**\n\`\`\`\n${steps.slice(-12).join('\n')}\n\`\`\`\n🔗 <https://github.com/goatshuman/minecraft-247-host>`;
+    if (statusMsg) await statusMsg.edit(successText).catch(() => {});
+    await log(`📁 ${type === 'world' ? 'World' : 'Mods'} Uploaded`, `Custom ${type} installed via web upload.`, 0x00aaff);
+  } catch (e) {
+    console.error(`[Upload] ${type} failed:`, e.message);
+    if (statusMsg) await statusMsg.edit(`❌ Upload failed: ${e.message}`).catch(() => {});
+  } finally {
+    // Clean up
+    try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch {}
+    try { if (fs.existsSync(tokenFile)) fs.unlinkSync(tokenFile); } catch {}
+    delete activeUploadTokens[token];
+  }
+}
+
+function startUploadPoller() {
+  setInterval(() => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) return;
+      const files = fs.readdirSync(DATA_DIR).filter(f => f.startsWith('token_') && f.endsWith('.json'));
+      for (const file of files) {
+        const tokenFile = path.join(DATA_DIR, file);
+        let data;
+        try { data = JSON.parse(fs.readFileSync(tokenFile, 'utf8')); } catch { continue; }
+        if (data.received && !data.processing) {
+          const token = file.replace('token_', '').replace('.json', '');
+          processUploadedFile(token, data).catch(e => console.error('[Poller] Error:', e.message));
+        }
+      }
+    } catch (e) {
+      console.error('[Poller] Error:', e.message);
+    }
+  }, 3000); // Poll every 3 seconds
+}
+
 // ─── Message commands ─────────────────────────────────────────────────────────
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (!isAllowed(message.author.id)) return;
-
-  // ── Handle zip attachment for world/mods upload ──
-  if (waitingUpload && message.channelId === waitingUpload.channelId && message.attachments.size > 0) {
-    const attachment = message.attachments.first();
-    const isZip = attachment.name?.endsWith('.zip') || attachment.contentType?.includes('zip');
-    if (!isZip) {
-      await message.reply('⚠️ Please send a `.zip` file.');
-      return;
-    }
-
-    const uploadType = waitingUpload.type;
-    clearTimeout(waitingUpload.timeout);
-    waitingUpload = null;
-
-    const statusMsg = await message.reply(`⏳ Processing your **${uploadType}** upload...`);
-
-    const steps = [];
-    const onProgress = (msg) => {
-      steps.push(msg);
-      statusMsg.edit(`⏳ Processing...\n\`\`\`\n${steps.slice(-8).join('\n')}\n\`\`\``).catch(() => {});
-    };
-
-    try {
-      if (uploadType === 'world') {
-        await handleWorldUpload(attachment, onProgress);
-        state.worldConfig.worldExists = true;
-        saveState(state);
-      } else {
-        await handleModsUpload(attachment, onProgress);
-      }
-
-      onProgress('');
-      onProgress('📤 Pushing to GitHub...');
-      await pushEverythingToGitHub(onProgress);
-
-      onProgress('');
-      await triggerRenderDeploy(onProgress);
-
-      await statusMsg.edit(
-        `✅ **${uploadType === 'world' ? 'World' : 'Mods'} uploaded successfully!**\n\`\`\`\n${steps.slice(-12).join('\n')}\n\`\`\`` +
-        `\n\n🔗 GitHub: <https://github.com/goatshuman/minecraft-247-host>`
-      );
-      await log(
-        `📁 ${uploadType === 'world' ? 'World' : 'Mods'} Uploaded`,
-        `Custom ${uploadType} installed, pushed to GitHub and deploy triggered.`,
-        0x00aaff
-      );
-    } catch (e) {
-      console.error(`[Upload] ${uploadType} upload failed:`, e.message);
-      await statusMsg.edit(`❌ Upload failed: ${e.message}`);
-    }
-    return;
-  }
 
   if (message.content === '!delete') {
     try {
@@ -597,6 +667,7 @@ client.once(Events.ClientReady, async () => {
   }
 
   startEmbedUpdater();
+  startUploadPoller();
 
   // Install Java in background
   ensureJava().then(javaPath => {
